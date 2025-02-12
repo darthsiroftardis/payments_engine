@@ -79,7 +79,7 @@ impl User {
 
     fn apply_deposit(&mut self, amount: f64) -> Result<(), Error> {
         if self.locked {
-            return Err(LockedAccount)
+            return Err(Error::LockedAccount)
         }
         self.available += amount;
         Ok(())
@@ -87,11 +87,20 @@ impl User {
 
     fn apply_withdrawal(&mut self, amount: f64) -> Result<(), Error> {
         if self.locked {
-            return Err(LockedAccount)
+            return Err(Error::LockedAccount)
         }
         if self.available >= amount {
             self.available -= amount
         }
+        Ok(())
+    }
+
+    fn apply_chargeback(&mut self, hold_amount: f64) -> Result<(), Error> {
+        if self.held < hold_amount {
+            self.lock_user();
+            return Err(Error::LockedAccount)
+        }
+        self.held -= hold_amount;
         Ok(())
     }
 
@@ -124,7 +133,7 @@ enum TransactionType {
     Chargeback,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Copy, Clone)]
 struct Transaction {
     #[serde(rename = "type")]
     transaction_type: TransactionType,
@@ -270,7 +279,7 @@ fn process_transactions(transactions: Vec<Transaction>) -> Result<BTreeMap<u16, 
                     match users.get_mut(&user_id) {
                         None => return Err(Error::MissingUser),
                         Some(user) => {
-                            user.apply_withdrawal(charge_back_amount)?;
+                            user.apply_chargeback(charge_back_amount)?;
                             user.lock_user()
                         }
                     };
@@ -349,4 +358,80 @@ mod tests {
             process_transactions(transactions).expect("must work based on test case");
         assert_eq!(expected_users, actual_users)
     }
+
+    #[test]
+    fn should_correctly_hold_based_on_dispute() {
+        let deposit_1= Transaction::new(TransactionType::Deposit, 1, 1, Some(10.0));
+        let deposit_2 =  Transaction::new(TransactionType::Deposit, 1, 2, Some(5.0));
+        let dispute = Transaction::new(TransactionType::Dispute, 1, 2, None);
+
+        let transactions =  vec![deposit_1, deposit_2, dispute];
+
+        let actual_users =
+            process_transactions(transactions).expect("must work based on test case");
+
+        let user = *actual_users.get(&1)
+            .expect("there must be at least one user");
+
+
+        assert_eq!(user.available, 10.0);
+        assert_eq!(user.held, 5.0);
+        assert_eq!(user.total(), 15.0);
+    }
+
+    #[test]
+    fn should_correctly_hold_based_on_dispute_and_release_based_on_resolve() {
+        let deposit_1= Transaction::new(TransactionType::Deposit, 1, 1, Some(10.0));
+        let deposit_2 =  Transaction::new(TransactionType::Deposit, 1, 2, Some(5.0));
+        let dispute = Transaction::new(TransactionType::Dispute, 1, 2, None);
+
+        let transactions =  vec![deposit_1, deposit_2, dispute];
+
+        let actual_users =
+            process_transactions(transactions).expect("must work based on test case");
+
+        let user = *actual_users.get(&1)
+            .expect("there must be at least one user");
+
+
+        assert_eq!(user.available, 10.0);
+        assert_eq!(user.held, 5.0);
+        assert_eq!(user.total(), 15.0);
+
+        let resolve = Transaction::new(TransactionType::Resolve, 1, 2, None);
+
+        let transactions =  vec![deposit_1, deposit_2, dispute, resolve];
+
+        let actual_users =
+            process_transactions(transactions).expect("must work based on test case");
+
+        let user = *actual_users.get(&1)
+            .expect("there must be at least one user");
+
+        assert_eq!(user.available, 15.0);
+        assert_eq!(user.held, 0.0);
+        assert_eq!(user.total(), 15.0);
+    }
+
+
+    #[test]
+    fn should_correctly_chargeback() {
+        let deposit_1= Transaction::new(TransactionType::Deposit, 1, 1, Some(10.0));
+        let deposit_2 =  Transaction::new(TransactionType::Deposit, 1, 2, Some(5.0));
+        let dispute = Transaction::new(TransactionType::Dispute, 1, 2, None);
+        let charge_back = Transaction::new(TransactionType::Chargeback, 1, 2, None);
+
+        let transactions =  vec![deposit_1, deposit_2, dispute, charge_back];
+
+        let actual_users =
+            process_transactions(transactions).expect("must work based on test case");
+
+        let user = *actual_users.get(&1)
+            .expect("there must be at least one user");
+
+        assert_eq!(user.available, 10.0);
+        assert_eq!(user.held, 0.0);
+        assert_eq!(user.total(), 10.0);
+    }
+
 }
